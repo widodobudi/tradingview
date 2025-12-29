@@ -1,0 +1,84 @@
+name: Line Count Guard
+
+on:
+  pull_request:
+    branches: ["main"]
+  push:
+    branches: ["main"]
+
+jobs:
+  linecount-guard:
+    runs-on: ubuntu-latest
+    env:
+      TARGET_FILE: autoproc.txt
+      THRESHOLD_PCT: "2.0"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine base ref (PR vs Push)
+        id: base
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            echo "BASE_REF=origin/${{ github.event.pull_request.base.ref }}" >> $GITHUB_OUTPUT
+          else
+            echo "BASE_REF=origin/main~1" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Fetch base ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --prune --depth=200 origin +refs/heads/*:refs/remotes/origin/*
+
+      - name: Line count check (fail if > threshold)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILE="${TARGET_FILE}"
+          THRESHOLD="${THRESHOLD_PCT}"
+          BASE_REF="${{ steps.base.outputs.BASE_REF }}"
+
+          if [[ ! -f "$FILE" ]]; then
+            echo "::error::Target file not found in current branch: $FILE"
+            exit 1
+          fi
+
+          if ! git cat-file -e "${BASE_REF}:${FILE}" 2>/dev/null; then
+            echo "::error::Target file not found in base ref (${BASE_REF}): $FILE"
+            echo "Make sure $FILE exists on base branch (main)."
+            exit 1
+          fi
+
+          BASE_LINES="$(git show "${BASE_REF}:${FILE}" | wc -l | tr -d ' ')"
+          NEW_LINES="$(wc -l < "$FILE" | tr -d ' ')"
+
+          if [[ "$BASE_LINES" -le 0 ]]; then
+            echo "::error::Base line count is zero or invalid: $BASE_LINES"
+            exit 1
+          fi
+
+          DIFF_LINES=$(( NEW_LINES - BASE_LINES ))
+          ABS_DIFF_LINES=$(( DIFF_LINES < 0 ? -DIFF_LINES : DIFF_LINES ))
+
+          # percent = abs(diff) / base * 100
+          PCT_DIFF="$(awk -v d="$ABS_DIFF_LINES" -v b="$BASE_LINES" 'BEGIN { printf "%.4f", (d/b)*100 }')"
+
+          echo "TARGET_FILE=$FILE"
+          echo "BASE_REF=$BASE_REF"
+          echo "BASE_LINES=$BASE_LINES"
+          echo "NEW_LINES=$NEW_LINES"
+          echo "DIFF_LINES=$DIFF_LINES"
+          echo "PCT_DIFF=$PCT_DIFF%"
+          echo "THRESHOLD_PCT=$THRESHOLD%"
+
+          # Fail if pct_diff > threshold
+          awk -v p="$PCT_DIFF" -v t="$THRESHOLD" 'BEGIN { exit (p>t)?1:0 }' \
+            && echo "OK: change within threshold." \
+            || { echo "::error::Line count change (${PCT_DIFF}%) exceeds threshold (${THRESHOLD}%)."; exit 1; }
