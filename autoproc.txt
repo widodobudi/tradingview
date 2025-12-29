@@ -58,6 +58,7 @@ useStartBelowBase = input.bool(true, "QuickBull start below base (%) enabled", g
 bullStartBelow = input.float(0, "QuickBull start below base (%)", step=0.1, group=groupQB)
 reqBullCloseBelowBase = input.bool(false, "QuickBull require close < base", group=groupQB)
 addQuoteVolQB = input.float(20, "AddFundQB volume (USDT)", group=groupQB, minval=0)
+xPctBBUpper = input.float(3.5, "xPct > BB Upper (%)", step=0.1, minval=0.0, group=groupQB)
 
 groupBase = "BASE"
 manualBaseSingle = input.float(0, "Manual Base (single pair) >0 to force", group=groupBase, minval=0)
@@ -119,6 +120,8 @@ f_fillPairVol(tmpl, pairUSDTbase, volStr) => str.replace(str.replace(tmpl, "{pai
 f_tfPack() =>
     bbLength = 20
     bbBasis = ta.sma(close, bbLength)
+    bbDev = ta.stdev(close, bbLength)
+    bbUpper = bbBasis + 2.0 * bbDev
     bbCrossUp = ta.crossover(close, bbBasis)
     bbBs = ta.barssince(bbCrossUp)
     bbPass = bbCrossUp or (not na(bbBs) and bbBs <= bbX)
@@ -165,7 +168,7 @@ f_tfPack() =>
     [stLine0, stDir] = ta.supertrend(factorST, atrPeriodST)
     uptrendOk = (stDir < 0) and (not na(stLine0)) and (close > stLine0)
     relVol = volume / ta.sma(volume, relVolLenAdd)
-    [bbPass, macdPass, histPass, uoCond, rsiPass, adxCond, stochPass, uptrendOk, stochK, relVol, close, bbBasis, bbCrossUp, macdLine, macdSignal, macdCrossUp, macdHist, histCrossUp, uoVal, rsi, rsiMa, rsiCrossUp, adxVal, stochD, stochCrossUp]
+    [bbPass, macdPass, histPass, uoCond, rsiPass, adxCond, stochPass, uptrendOk, stochK, relVol, close, bbBasis, bbUpper, bbCrossUp, macdLine, macdSignal, macdCrossUp, macdHist, histCrossUp, uoVal, rsi, rsiMa, rsiCrossUp, adxVal, stochD, stochCrossUp]
 
 f_overPack() =>
     s20 = ta.sma(close, 20)
@@ -240,6 +243,7 @@ var int[] fUpBsArr = array.new_int(maxPairs, na)
 
 bool anyQuickBearTrig = false
 bool anyQuickBullOverTrig = false
+bool xPctGTBBUpperCond = false
 
 for i = 0 to maxPairs - 1
     bool usePair = i < pairsCount
@@ -251,7 +255,7 @@ for i = 0 to maxPairs - 1
 
     string pairBot = usePair ? f_pairToUSDTbase(pair3c) : ""
 
-    [bbPass_t, macdPass_t, histPass_t, uoCond_t, rsiPass_t, adxCond_t, stochPass_t, uptrendOk_t, stochK_t, relVol_t, pxNow_t, bbBasis_t, bbCrossUp_t, macdLine_t, macdSignal_t, macdCrossUp_t, macdHist_t, histCrossUp_t, uoVal_t, rsi_t, rsiMa_t, rsiCrossUp_t, adxVal_t, stochD_t, stochCrossUp_t] = request.security(symbolIdSafe, timeframe.period, f_tfPack())
+    [bbPass_t, macdPass_t, histPass_t, uoCond_t, rsiPass_t, adxCond_t, stochPass_t, uptrendOk_t, stochK_t, relVol_t, pxNow_t, bbBasis_t, bbUpper_t, bbCrossUp_t, macdLine_t, macdSignal_t, macdCrossUp_t, macdHist_t, histCrossUp_t, uoVal_t, rsi_t, rsiMa_t, rsiCrossUp_t, adxVal_t, stochD_t, stochCrossUp_t] = request.security(symbolIdSafe, timeframe.period, f_tfPack())
     [overCondTF, overEdgeTF, overConfTF] = request.security(symbolIdSafe, overSmasTF, f_overPack(), lookahead=barmerge.lookahead_off)
 
     bool isIdxSym = f_isIdx(symbolIdSafe, false)
@@ -307,6 +311,10 @@ for i = 0 to maxPairs - 1
             if (stBullLtf >= bullMinFat) and startOKU and closeBelowOKU
                 qBullAnyInBar := true
     bool qBullSignal = hasBaseEff and qBullAnyInBar
+
+    float bbUpperThr = not na(bbUpper_t) ? (bbUpper_t * (1 + xPctBBUpper / 100.0)) : na
+    bool xPctGTBBUpper_t = not na(pxNow_t) and not na(bbUpperThr) and (pxNow_t > bbUpperThr)
+    xPctGTBBUpperCond := xPctGTBBUpperCond or (usePair and xPctGTBBUpper_t)
 
     bool prevQBullSig = array.get(qBullVisPrevArr, i)
     array.set(qBullVisPrevArr, i, qBullSignal)
@@ -441,7 +449,9 @@ for i = 0 to maxPairs - 1
         baseEffChart := baseValEff
         hasBaseChart := hasBaseEff
 
-alertcondition(anyQuickBearTrig, title="QuickBear Trigger", message=" ")
+bool quickBearOrXGTBB = anyQuickBearTrig or xPctGTBBUpperCond
+
+alertcondition(quickBearOrXGTBB, title="QuickBear Trigger", message=" ")
 alertcondition(anyQuickBullOverTrig, title="QuickBull or OverSMAs", message=" ")
 
 plotshape(showQuickBearLabels and qBearNowChart, title="QuickBear Arrow", location=location.abovebar, style=shape.triangledown, color=color.red, size=size.tiny, text="QBear")
