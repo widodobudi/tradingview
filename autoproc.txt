@@ -52,6 +52,7 @@ bearTol = input.float(105.0, "QuickBear lower shadow tolerance (%)", step=0.1, g
 bullTol = input.float(5.0, "QuickBull upper shadow tolerance (%)", step=0.1, group=groupQB)
 bearMinFat = input.int(4, "QuickBear min fat", minval=1, group=groupQB)
 bearStartAbove = input.float(0, "QuickBear start above base (%)", step=0.1, group=groupQB)
+xPctBBUpper = input.float(3.5, "QuickBear: X% above BB Upper", step=0.1, group=groupQB)
 bullLowerTF = input.string("3", "QuickBull lower TF", options=["1","3","5","15"], group=groupQB)
 bullMinFat = input.int(5, "QuickBull min fat", minval=1, group=groupQB)
 useStartBelowBase = input.bool(true, "QuickBull start below base (%) enabled", group=groupQB)
@@ -118,7 +119,19 @@ f_fillPairVol(tmpl, pairUSDTbase, volStr) => str.replace(str.replace(tmpl, "{pai
 
 f_tfPack() =>
     bbLength = 20
-    bbBasis = ta.sma(close, bbLength)
+    bbMaType = "SMA"
+    bbMult = 2.0
+    bbSrc = close
+    ma(source, length, _type) =>
+        switch _type
+            "SMA" => ta.sma(source, length)
+            "EMA" => ta.ema(source, length)
+            "SMMA (RMA)" => ta.rma(source, length)
+            "WMA" => ta.wma(source, length)
+            "VWMA" => ta.vwma(source, length)
+    bbBasis = ma(bbSrc, bbLength, bbMaType)
+    bbDev = bbMult * ta.stdev(bbSrc, bbLength)
+    bbUpper = bbBasis + bbDev
     bbCrossUp = ta.crossover(close, bbBasis)
     bbBs = ta.barssince(bbCrossUp)
     bbPass = bbCrossUp or (not na(bbBs) and bbBs <= bbX)
@@ -165,7 +178,7 @@ f_tfPack() =>
     [stLine0, stDir] = ta.supertrend(factorST, atrPeriodST)
     uptrendOk = (stDir < 0) and (not na(stLine0)) and (close > stLine0)
     relVol = volume / ta.sma(volume, relVolLenAdd)
-    [bbPass, macdPass, histPass, uoCond, rsiPass, adxCond, stochPass, uptrendOk, stochK, relVol, close, bbBasis, bbCrossUp, macdLine, macdSignal, macdCrossUp, macdHist, histCrossUp, uoVal, rsi, rsiMa, rsiCrossUp, adxVal, stochD, stochCrossUp]
+    [bbPass, macdPass, histPass, uoCond, rsiPass, adxCond, stochPass, uptrendOk, stochK, relVol, close, bbBasis, bbUpper, bbCrossUp, macdLine, macdSignal, macdCrossUp, macdHist, histCrossUp, uoVal, rsi, rsiMa, rsiCrossUp, adxVal, stochD, stochCrossUp]
 
 f_overPack() =>
     s20 = ta.sma(close, 20)
@@ -251,7 +264,7 @@ for i = 0 to maxPairs - 1
 
     string pairBot = usePair ? f_pairToUSDTbase(pair3c) : ""
 
-    [bbPass_t, macdPass_t, histPass_t, uoCond_t, rsiPass_t, adxCond_t, stochPass_t, uptrendOk_t, stochK_t, relVol_t, pxNow_t, bbBasis_t, bbCrossUp_t, macdLine_t, macdSignal_t, macdCrossUp_t, macdHist_t, histCrossUp_t, uoVal_t, rsi_t, rsiMa_t, rsiCrossUp_t, adxVal_t, stochD_t, stochCrossUp_t] = request.security(symbolIdSafe, timeframe.period, f_tfPack())
+    [bbPass_t, macdPass_t, histPass_t, uoCond_t, rsiPass_t, adxCond_t, stochPass_t, uptrendOk_t, stochK_t, relVol_t, pxNow_t, bbBasis_t, bbUpper_t, bbCrossUp_t, macdLine_t, macdSignal_t, macdCrossUp_t, macdHist_t, histCrossUp_t, uoVal_t, rsi_t, rsiMa_t, rsiCrossUp_t, adxVal_t, stochD_t, stochCrossUp_t] = request.security(symbolIdSafe, timeframe.period, f_tfPack())
     [overCondTF, overEdgeTF, overConfTF] = request.security(symbolIdSafe, overSmasTF, f_overPack(), lookahead=barmerge.lookahead_off)
 
     bool isIdxSym = f_isIdx(symbolIdSafe, false)
@@ -286,6 +299,7 @@ for i = 0 to maxPairs - 1
             bool startOKB = hasBaseEff and (cB >= baseValEff * (1 + bearStartAbove/100.0))
             if (stBearLtf >= bearMinFat) and startOKB
                 qBearAnyInBar := true
+    bool quickBearXgtBB = not na(bbUpper_t) and (pxNow_t > bbUpper_t * (1 + xPctBBUpper / 100.0))
     bool qBearSignal = hasBaseEff and qBearAnyInBar
 
     int stBullLtf = 0
@@ -329,7 +343,7 @@ for i = 0 to maxPairs - 1
 
     bool qBullOverAL = everOL_state and hasBaseEff and ((qBullSignal and not prevQBullSig) or overSmasTrig)
 
-    anyQuickBearTrig := anyQuickBearTrig or (usePair and qBearSignal)
+    anyQuickBearTrig := anyQuickBearTrig or (usePair and (qBearSignal or quickBearXgtBB))
     anyQuickBullOverTrig := anyQuickBullOverTrig or (usePair and qBullOverAL)
 
     bool okLock = (anyFreqOpt == "OPBC") ? barstate.isconfirmed : true
@@ -441,8 +455,10 @@ for i = 0 to maxPairs - 1
         baseEffChart := baseValEff
         hasBaseChart := hasBaseEff
 
-alertcondition(anyQuickBearTrig, title="QuickBear Trigger", message=" ")
-alertcondition(anyQuickBullOverTrig, title="QuickBull or OverSMAs", message=" ")
+bool qbAlertsEnabled = enableAnyAlerts
+
+alertcondition(qbAlertsEnabled and anyQuickBearTrig, title="QuickBear Trigger", message=" ")
+alertcondition(qbAlertsEnabled and anyQuickBullOverTrig, title="QuickBull or OverSMAs", message=" ")
 
 plotshape(showQuickBearLabels and qBearNowChart, title="QuickBear Arrow", location=location.abovebar, style=shape.triangledown, color=color.red, size=size.tiny, text="QBear")
 plotshape(showQuickBullLabels and qBullNowChart, title="QuickBull Arrow", location=location.belowbar, style=shape.triangleup, color=color.blue, size=size.tiny, text="QBull")
