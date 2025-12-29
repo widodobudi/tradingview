@@ -1,0 +1,573 @@
+//@version=6
+indicator("Auto-Process", "AutoProc", overlay=true, max_lines_count=500, max_labels_count=500)
+// REMARK: Version=v2025-12-27-v3.49-NoScannerTable-FIX16i • FIX: Restore Status/Focus table; HardLimitPairs=3; QB/QBull use request.security_lower_tf() arrays + streak + wickTol bearTol/bullTol like TradeLife; alertcondition QB/QBullorOS no OPBC gating.
+
+import TradingView/TechnicalRating/3 as TVtr
+
+usePriceCrossBB = input.bool(true, "Price cross up BB Basis")
+useMacdCross = input.bool(true, "MACD Level cross up Signal")
+useHistCrossZero = input.bool(true, "MACD Histogram cross up 0")
+useUoFilter = input.bool(true, "UO > 40 dan < Max UO (Open Long)")
+useRsiCrossMa = input.bool(true, "RSI cross up RSI-MA")
+useAdxFilter = input.bool(true, "ADX > 15 dan < Max ADX")
+useStochCross = input.bool(true, "Stoch K cross up D")
+usePriceAboveUpTrendST = input.bool(true, "Price above Supertrend (Up Trend)")
+bbX = input.int(1, "BB recency bars", minval=0)
+macdX = input.int(2, "MACD recency bars", minval=0)
+histX = input.int(2, "Hist recency bars", minval=0)
+rsiX = input.int(2, "RSI recency bars", minval=0)
+stochX = input.int(2, "Stoch recency bars", minval=0)
+uoMax = input.float(60.0, "Max UO", step=1)
+adxMax = input.float(35.0, "Max ADX", step=1)
+
+groupPairs = "PAIRS"
+pairsText = input.string("BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT", "Pairs (comma separated) • Hard limit 3 used", group=groupPairs)
+
+groupAlert = "ALERTS • Any Pair"
+enableAnyAlerts = input.bool(true, "Enable Any-Pair Alerts", group=groupAlert)
+enableAnyOpenLong = input.bool(true, "Alert: OpenLong", group=groupAlert)
+enableAnyAddFund = input.bool(true, "Alert: AddFundClassic", group=groupAlert)
+enableAnyAddFundQB = input.bool(true, "Alert: AddFundQB", group=groupAlert)
+anyFreqOpt = input.string("OPB", "Alert Frequency", options=["OPB","OPBC"], group=groupAlert)
+
+// --- JSON templates (3Commas bot format) ---
+jsonOpenLongTmpl = input.string('{ "message_type":"bot", "bot_id":16380123, "email_token":"f97400b9-e9a4-4058-913e-35eb8372f920", "delay_seconds":0, "pair":"{pair}" }', "JSON Template OpenLong", group=groupAlert)
+jsonAddFundTmpl = input.string('{ "action":"add_funds_in_quote", "message_type":"bot", "bot_id":16380123, "email_token":"f97400b9-e9a4-4058-913e-35eb8372f920", "delay_seconds":0, "pair":"{pair}", "volume":{volume} }', "JSON Template AddFundClassic", group=groupAlert)
+jsonAddFundQBTmpl = input.string('{ "action":"add_funds_in_quote", "message_type":"bot", "bot_id":16380123, "email_token":"f97400b9-e9a4-4058-913e-35eb8372f920", "delay_seconds":0, "pair":"{pair}", "volume":{volume} }', "JSON Template AddFundQB", group=groupAlert)
+jsonAddFundAfterBaseTmpl = input.string('{ "action":"add_funds_in_quote", "message_type":"bot", "bot_id":16380123, "email_token":"f97400b9-e9a4-4058-913e-35eb8372f920", "delay_seconds":8, "pair":"{pair}", "volume":{volume} }', "JSON Template AddFundAfterBase", group=groupAlert)
+
+groupAddFund = "ADD FUND • Classic"
+addQuoteVol = input.float(20, "AddFundClassic volume (USDT)", group=groupAddFund, minval=0)
+stochHighAdd = input.float(65, "StochK <= (AddFundClassic)", group=groupAddFund, minval=0, maxval=100)
+relVolLenAdd = input.int(20, "RelVol SMA Len (AddFundClassic)", group=groupAddFund, minval=1)
+relVolMinAdd = input.float(1.2, "RelVol >= (AddFundClassic)", group=groupAddFund, minval=0)
+tr30MinAdd = input.float(0.25, "Min TR fast (>)", group=groupAddFund, minval=0)
+tr1dMinAdd = input.float(0.10, "Min TR slow (>)", group=groupAddFund, minval=0)
+useTr30Up3 = input.bool(true, "Require TR Fast Up ×3 (AddFundClassic)", group=groupAddFund)
+useTr1DUp2 = input.bool(true, "Require TR Slow Up ×2 (AddFundClassic)", group=groupAddFund)
+
+groupQB = "QUICKBEAR / QUICKBULL"
+bearLowerTF = input.string("3", "QuickBear lower TF", options=["1","3","5","15"], group=groupQB)
+bearTol = input.float(105.0, "QuickBear lower shadow tolerance (%)", step=0.1, group=groupQB)
+bullTol = input.float(5.0, "QuickBull upper shadow tolerance (%)", step=0.1, group=groupQB)
+bearMinFat = input.int(4, "QuickBear min fat", minval=1, group=groupQB)
+bearStartAbove = input.float(0, "QuickBear start above base (%)", step=0.1, group=groupQB)
+bullLowerTF = input.string("3", "QuickBull lower TF", options=["1","3","5","15"], group=groupQB)
+bullMinFat = input.int(5, "QuickBull min fat", minval=1, group=groupQB)
+useStartBelowBase = input.bool(true, "QuickBull start below base (%) enabled", group=groupQB)
+bullStartBelow = input.float(0, "QuickBull start below base (%)", step=0.1, group=groupQB)
+reqBullCloseBelowBase = input.bool(false, "QuickBull require close < base", group=groupQB)
+addQuoteVolQB = input.float(20, "AddFundQB volume (USDT)", group=groupQB, minval=0)
+
+groupBase = "BASE"
+manualBaseSingle = input.float(0, "Manual Base (single pair) >0 to force", group=groupBase, minval=0)
+useAutoBaseOLOverSMAs = input.bool(true, "Auto base lock after OpenLong when SMA>20&50", group=groupBase)
+autoAddFundAfterBaseUSDT = input.float(20, "AddFundAfterBase volume (USDT)", group=groupBase, minval=0)
+
+groupOver = "OVER SMAs"
+overSmasTF = input.string("240", "SMA check TF (e.g. 240=4H)", group=groupOver)
+overSmasMode = input.string("Once Per Bar Close", "OverSMAs Mode", options=["Any","Once Per Bar Close","Only Once"], group=groupOver)
+
+groupVisual = "VISUAL"
+showQuickBearLabels = input.bool(true, "Show QuickBear Labels/Arrows", group=groupVisual)
+showQuickBullLabels = input.bool(true, "Show QuickBull Labels/Arrows", group=groupVisual)
+qBearAtrLenVis = input.int(14, "QBear label ATR len", group=groupVisual, minval=1)
+qBearOffATRVis = input.float(1.0, "QBear label ATR offset", group=groupVisual, step=0.1)
+qBearLblRight = input.int(0, "QBear label right offset (bars)", group=groupVisual)
+qBullAtrLenVis = input.int(14, "QBull label ATR len", group=groupVisual, minval=1)
+qBullOffATRVis = input.float(1.0, "QBull label ATR offset", group=groupVisual, step=0.1)
+qBullLblRight = input.int(0, "QBull label right offset (bars)", group=groupVisual)
+
+groupStatus = "STATUS TABLE • Dashboard"
+showStatusTable = input.bool(true, "Show Status Table", group=groupStatus)
+statusPrecision = input.int(2, "Percent decimals", minval=0, maxval=6, group=groupStatus)
+statusShowUnchecked = input.bool(true, "Show unchecked marks (×)", group=groupStatus)
+
+groupEver = "everOL • Chart Pair Mode"
+everOL_chartMode = input.string("AUTO", "everOL Mode (chart pair only)", options=["AUTO","FORCE TRUE","FORCE FALSE"], group=groupEver)
+
+groupFocus = "FOCUS • Top-2 Dipantau"
+showFocusRows = input.bool(true, "Show Focus Top-2 Rows (under table)", group=groupFocus)
+uptrendRecencyBars = input.int(5, "Uptrend must be NEW within bars", minval=0, group=groupFocus)
+
+groupTable = "TABLE • Layout"
+tableOffX = input.int(8, "Horizontal Offset (cells)", group=groupTable, minval=0)
+tableOffY = input.int(2, "Vertical Offset (cells)", group=groupTable, minval=0)
+spacerChars = input.int(8, "Spacer width (chars)", group=groupTable, minval=1, maxval=50)
+trFontOpt = input.string("Small", "Text Size", options=["Tiny","Small","Normal"], group=groupTable)
+trTextSize = trFontOpt == "Tiny" ? size.tiny : trFontOpt == "Small" ? size.small : size.normal
+
+pairsArray = str.split(pairsText, ",")
+
+f_eps() => syminfo.mintick
+f_fmtPct(v) => str.tostring(v, "#." + str.repeat("#", statusPrecision)) + "%"
+f_pctStr(diff, denom) => denomAbs = math.max(math.abs(denom), f_eps()), pct = (diff / denomAbs) * 100.0, pct < 0 ? "(-)" + f_fmtPct(math.abs(pct)) : f_fmtPct(pct)
+f_numStr(v) => str.tostring(v, "#.##")
+f_modeChar(modeStr) => modeStr == "AUTO" ? "A" : modeStr == "FORCE TRUE" ? "T" : "F"
+f_isIdx(symId, isChartSym) => str.startswith(symId, "IDX:") or (isChartSym and syminfo.prefix == "IDX")
+f_rtAll() => [rtAll, _, _] = TVtr.calcRatingAll(), rtAll
+
+f_pairToUSDTbase(p3c) =>
+    s = str.upper(str.trim(p3c))
+    isUsdt = str.length(s) > 4 and str.substring(s, str.length(s) - 4, str.length(s)) == "USDT"
+    base = isUsdt ? str.substring(s, 0, str.length(s) - 4) : s
+    isUsdt ? ("USDT_" + base) : s
+
+f_fillPairOnly(tmpl, pairUSDTbase) => str.replace(tmpl, "{pair}", pairUSDTbase)
+f_fillPairVol(tmpl, pairUSDTbase, volStr) => str.replace(str.replace(tmpl, "{pair}", pairUSDTbase), "{volume}", volStr)
+
+f_tfPack() =>
+    bbLength = 20
+    bbBasis = ta.sma(close, bbLength)
+    bbCrossUp = ta.crossover(close, bbBasis)
+    bbBs = ta.barssince(bbCrossUp)
+    bbPass = bbCrossUp or (not na(bbBs) and bbBs <= bbX)
+    [macdLine, macdSignal, macdHist] = ta.macd(close, 12, 26, 9)
+    macdCrossUp = (macdLine > macdSignal and macdLine[1] <= macdSignal[1])
+    macdBs = ta.barssince(macdCrossUp)
+    macdPass = macdCrossUp or (not na(macdBs) and macdBs <= macdX)
+    histCrossUp = (macdHist > 0 and macdHist[1] <= 0)
+    histBs = ta.barssince(histCrossUp)
+    histPass = histCrossUp or (not na(histBs) and histBs <= histX)
+    uoShortLen = 7
+    uoMidLen = 14
+    uoLongLen = 28
+    prevClose = nz(close[1], close)
+    bp = close - math.min(low, prevClose)
+    tr = math.max(high, prevClose) - math.min(low, prevClose)
+    bpShort = ta.sma(bp, uoShortLen) * uoShortLen
+    trShort = ta.sma(tr, uoShortLen) * uoShortLen
+    bpMid = ta.sma(bp, uoMidLen) * uoMidLen
+    trMid = ta.sma(tr, uoMidLen) * uoMidLen
+    bpLong = ta.sma(bp, uoLongLen) * uoLongLen
+    trLong = ta.sma(tr, uoLongLen) * uoLongLen
+    denomUo = 4.0 * trShort + 2.0 * trMid + trLong
+    uoVal = denomUo != 0.0 ? 100.0 * (4.0 * bpShort + 2.0 * bpMid + bpLong) / denomUo : 0.0
+    uoCond = (uoVal > 40) and (uoVal < uoMax)
+    rsiLen = 14
+    rsi = ta.rsi(close, rsiLen)
+    rsiMa = ta.sma(rsi, rsiLen)
+    rsiCrossUp = (rsi > rsiMa and rsi[1] <= rsiMa[1])
+    rsiBs = ta.barssince(rsiCrossUp)
+    rsiPass = rsiCrossUp or (not na(rsiBs) and rsiBs <= rsiX)
+    adxLen = 14
+    [pDI, mDI, adxVal] = ta.dmi(adxLen, adxLen)
+    adxCond = (adxVal > 15) and (adxVal < adxMax)
+    stochLenK = 14
+    stochLenD = 3
+    stochK = ta.stoch(close, high, low, stochLenK)
+    stochD = ta.sma(stochK, stochLenD)
+    stochCrossUp = (stochK > stochD and stochK[1] <= stochD[1])
+    stochBs = ta.barssince(stochCrossUp)
+    stochPass = stochCrossUp or (not na(stochBs) and stochBs <= stochX)
+    atrPeriodST = 10
+    factorST = 3.0
+    [stLine0, stDir] = ta.supertrend(factorST, atrPeriodST)
+    uptrendOk = (stDir < 0) and (not na(stLine0)) and (close > stLine0)
+    relVol = volume / ta.sma(volume, relVolLenAdd)
+    [bbPass, macdPass, histPass, uoCond, rsiPass, adxCond, stochPass, uptrendOk, stochK, relVol, close, bbBasis, bbCrossUp, macdLine, macdSignal, macdCrossUp, macdHist, histCrossUp, uoVal, rsi, rsiMa, rsiCrossUp, adxVal, stochD, stochCrossUp]
+
+f_overPack() =>
+    s20 = ta.sma(close, 20)
+    s50 = ta.sma(close, 50)
+    cond = close > s20 and close > s50
+    edge = ta.change(cond ? 1 : 0) == 1
+    conf = barstate.isconfirmed
+    [cond, edge, conf]
+
+var int maxPairs = 3
+var int statusCols = 20
+var table tbl = na
+
+int pairsCountRaw = array.size(pairsArray)
+int pairsCount = pairsCountRaw > maxPairs ? maxPairs : pairsCountRaw
+int statusRows = showStatusTable ? (1 + pairsCount) : 0
+int focusExtraRows = (showStatusTable and showFocusRows) ? 4 : 0
+int tblRowCount = math.max(1, tableOffY + statusRows + 2 + focusExtraRows)
+int tblColCount = statusCols + tableOffX
+
+bool rebuildTbl = barstate.isfirst or (tableOffX != tableOffX[1]) or (tableOffY != tableOffY[1]) or (spacerChars != spacerChars[1]) or (showStatusTable != showStatusTable[1]) or (pairsText != pairsText[1]) or (showFocusRows != showFocusRows[1])
+if rebuildTbl
+    if not na(tbl)
+        table.delete(tbl)
+    tbl := table.new(position.top_right, tblColCount, tblRowCount, border_width=1)
+
+var bool[] everOlArr = array.new_bool(maxPairs, false)
+var int[] lastAnyTimeArr = array.new_int(maxPairs, na)
+var bool[] baseLockedArr = array.new_bool(maxPairs, false)
+var float[] baseValArr = array.new_float(maxPairs, na)
+var bool[] overSmasFiredOnceArr = array.new_bool(maxPairs, false)
+var bool[] qBullVisPrevArr = array.new_bool(maxPairs, false)
+
+var bool qBearNowChart = false
+var bool qBullNowChart = false
+var int stBearChart = na
+var int stBullChart = na
+var float baseEffChart = na
+var bool hasBaseChart = false
+var label qBearCountLbl = na
+var label qBullCountLbl = na
+
+freqAny = anyFreqOpt == "OPBC" ? alert.freq_once_per_bar_close : alert.freq_once_per_bar
+
+var string[] stPair = array.new_string(maxPairs, "")
+var string[] stTrF = array.new_string(maxPairs, "")
+var string[] stTrS = array.new_string(maxPairs, "")
+var string[] stBase = array.new_string(maxPairs, "")
+var string[] stBVal = array.new_string(maxPairs, "")
+var string[] stBB = array.new_string(maxPairs, "")
+var string[] stMACD = array.new_string(maxPairs, "")
+var string[] stHIST = array.new_string(maxPairs, "")
+var string[] stUO = array.new_string(maxPairs, "")
+var string[] stRSI = array.new_string(maxPairs, "")
+var string[] stADX = array.new_string(maxPairs, "")
+var string[] stSTOCH = array.new_string(maxPairs, "")
+var string[] stST = array.new_string(maxPairs, "")
+var string[] stEOL = array.new_string(maxPairs, "")
+var string[] stRV = array.new_string(maxPairs, "")
+var string[] stPassedAFQB = array.new_string(maxPairs, "")
+var string[] stQBear = array.new_string(maxPairs, "")
+var string[] stQBull = array.new_string(maxPairs, "")
+var string[] stOS = array.new_string(maxPairs, "")
+var string[] stQBullorOS = array.new_string(maxPairs, "")
+
+var float[] fScoreArr = array.new_float(maxPairs, na)
+var bool[] fEligArr = array.new_bool(maxPairs, false)
+var float[] fUoArr = array.new_float(maxPairs, na)
+var float[] fAdxArr = array.new_float(maxPairs, na)
+var float[] fRvArr = array.new_float(maxPairs, na)
+var int[] fUpBsArr = array.new_int(maxPairs, na)
+
+bool anyQuickBearTrig = false
+bool anyQuickBullOverTrig = false
+
+for i = 0 to maxPairs - 1
+    bool usePair = i < pairsCount
+    string pairRaw = usePair ? str.trim(array.get(pairsArray, i)) : ""
+    string pair3c = str.upper(pairRaw)
+    string symbolIdSafe = usePair and str.length(pair3c) > 0 ? ("BINANCE:" + pair3c) : syminfo.tickerid
+    string symTxt = usePair ? pair3c : ""
+    bool isChartSym = usePair and (syminfo.ticker == pair3c)
+
+    string pairBot = usePair ? f_pairToUSDTbase(pair3c) : ""
+
+    [bbPass_t, macdPass_t, histPass_t, uoCond_t, rsiPass_t, adxCond_t, stochPass_t, uptrendOk_t, stochK_t, relVol_t, pxNow_t, bbBasis_t, bbCrossUp_t, macdLine_t, macdSignal_t, macdCrossUp_t, macdHist_t, histCrossUp_t, uoVal_t, rsi_t, rsiMa_t, rsiCrossUp_t, adxVal_t, stochD_t, stochCrossUp_t] = request.security(symbolIdSafe, timeframe.period, f_tfPack())
+    [overCondTF, overEdgeTF, overConfTF] = request.security(symbolIdSafe, overSmasTF, f_overPack(), lookahead=barmerge.lookahead_off)
+
+    bool isIdxSym = f_isIdx(symbolIdSafe, false)
+    string tfFast = isIdxSym ? "240" : "30"
+    string tfSlow = isIdxSym ? "1W" : "1D"
+    float rtFast = request.security(symbolIdSafe, tfFast, f_rtAll(), lookahead=barmerge.lookahead_on)
+    float rtSlow = request.security(symbolIdSafe, tfSlow, f_rtAll(), lookahead=barmerge.lookahead_on)
+    bool tr8Up3 = not na(rtFast) and not na(rtFast[1]) and not na(rtFast[2]) and (rtFast[2] < rtFast[1]) and (rtFast[1] < rtFast)
+    bool tr9Up2 = not na(rtSlow) and not na(rtSlow[1]) and (rtSlow[1] < rtSlow)
+    bool trFastOk = not na(rtFast) and (rtFast > tr30MinAdd) and (not useTr30Up3 or tr8Up3)
+    bool trSlowOk = not na(rtSlow) and (rtSlow > tr1dMinAdd) and (not useTr1DUp2 or tr9Up2)
+
+    bool baseLocked = array.get(baseLockedArr, i)
+    float baseVal = array.get(baseValArr, i)
+    bool manualHas = manualBaseSingle > 0
+    float baseValEff = manualHas ? manualBaseSingle : (baseLocked and not na(baseVal) and baseVal > 0 ? baseVal : na)
+    bool hasBaseEff = manualHas or (baseLocked and not na(baseVal) and baseVal > 0)
+
+    int stBearLtf = 0
+    bool qBearAnyInBar = false
+    float[] bearC = request.security_lower_tf(symbolIdSafe, bearLowerTF, close)
+    float[] bearO = request.security_lower_tf(symbolIdSafe, bearLowerTF, open)
+    float[] bearL = request.security_lower_tf(symbolIdSafe, bearLowerTF, low)
+    int nBear = array.size(bearC)
+    if nBear > 0
+        for k = 0 to nBear - 1
+            float cB = array.get(bearC, k)
+            float oB = array.get(bearO, k)
+            float lB = array.get(bearL, k)
+            bool condB = (cB < oB) and ((cB - lB) <= cB * bearTol / 100.0)
+            stBearLtf := condB ? (stBearLtf + 1) : 0
+            bool startOKB = hasBaseEff and (cB >= baseValEff * (1 + bearStartAbove/100.0))
+            if (stBearLtf >= bearMinFat) and startOKB
+                qBearAnyInBar := true
+    bool qBearSignal = hasBaseEff and qBearAnyInBar
+
+    int stBullLtf = 0
+    bool qBullAnyInBar = false
+    float[] bullC = request.security_lower_tf(symbolIdSafe, bullLowerTF, close)
+    float[] bullO = request.security_lower_tf(symbolIdSafe, bullLowerTF, open)
+    float[] bullH = request.security_lower_tf(symbolIdSafe, bullLowerTF, high)
+    int nBull = array.size(bullC)
+    if nBull > 0
+        for k = 0 to nBull - 1
+            float cU = array.get(bullC, k)
+            float oU = array.get(bullO, k)
+            float hU = array.get(bullH, k)
+            bool wickOKU = (hU - cU) <= cU * bullTol / 100.0
+            bool condU = (cU > oU) and wickOKU
+            stBullLtf := condU ? (stBullLtf + 1) : 0
+            bool startOKU = hasBaseEff and (useStartBelowBase ? (cU <= baseValEff * (1 + bullStartBelow/100.0)) : true)
+            bool closeBelowOKU = reqBullCloseBelowBase ? (hasBaseEff and (cU < baseValEff)) : true
+            if (stBullLtf >= bullMinFat) and startOKU and closeBelowOKU
+                qBullAnyInBar := true
+    bool qBullSignal = hasBaseEff and qBullAnyInBar
+
+    bool prevQBullSig = array.get(qBullVisPrevArr, i)
+    array.set(qBullVisPrevArr, i, qBullSignal)
+
+    bool overSmasFiredOnce = array.get(overSmasFiredOnceArr, i)
+    bool overSmasTrig = overSmasMode == "Once Per Bar Close" ? (overCondTF and overConfTF) : overSmasMode == "Only Once" ? (overEdgeTF and not overSmasFiredOnce) : overCondTF
+    if overSmasMode == "Only Once" and overSmasTrig
+        array.set(overSmasFiredOnceArr, i, true)
+
+    bool longSig7 = (not usePriceCrossBB or bbPass_t) and (not useMacdCross or macdPass_t) and (not useHistCrossZero or histPass_t) and (not useUoFilter or uoCond_t) and (not useRsiCrossMa or rsiPass_t) and (not useAdxFilter or adxCond_t) and (not useStochCross or stochPass_t) and (not usePriceAboveUpTrendST or uptrendOk_t)
+    bool addFundClassicCore = (not na(stochK_t)) and (stochK_t <= stochHighAdd) and (not na(relVol_t)) and (relVol_t >= relVolMinAdd) and trFastOk and trSlowOk and (addQuoteVol > 0)
+
+    bool openLongEvent = longSig7 and ((anyFreqOpt == "OPBC") ? barstate.isconfirmed : true)
+    if usePair and openLongEvent
+        array.set(everOlArr, i, true)
+
+    bool everOL_state = array.get(everOlArr, i)
+    bool everOL_effective = isChartSym ? (everOL_chartMode == "AUTO" ? everOL_state : everOL_chartMode == "FORCE TRUE" ? true : false) : everOL_state
+    string modeChar = isChartSym ? f_modeChar(everOL_chartMode) : ""
+
+    bool qBullOverAL = everOL_state and hasBaseEff and ((qBullSignal and not prevQBullSig) or overSmasTrig)
+
+    anyQuickBearTrig := anyQuickBearTrig or (usePair and qBearSignal)
+    anyQuickBullOverTrig := anyQuickBullOverTrig or (usePair and qBullOverAL)
+
+    bool okLock = (anyFreqOpt == "OPBC") ? barstate.isconfirmed : true
+    int lastAnyT = array.get(lastAnyTimeArr, i)
+    bool canSendThisBar = barstate.isrealtime and okLock and (na(lastAnyT) or time != lastAnyT)
+
+    string volClassic = str.tostring(int(addQuoteVol))
+    string volQB = str.tostring(int(addQuoteVolQB))
+    string volAfterBase = str.tostring(int(autoAddFundAfterBaseUSDT))
+
+    if usePair and enableAnyAlerts
+        if canSendThisBar and enableAnyOpenLong and longSig7
+            alert(f_fillPairOnly(jsonOpenLongTmpl, pairBot), freqAny)
+            array.set(lastAnyTimeArr, i, time)
+            if useAutoBaseOLOverSMAs and overCondTF and (not array.get(baseLockedArr, i)) and (autoAddFundAfterBaseUSDT > 0)
+                array.set(baseLockedArr, i, true)
+                array.set(baseValArr, i, pxNow_t)
+                alert(f_fillPairVol(jsonAddFundAfterBaseTmpl, pairBot, volAfterBase), freqAny)
+        else if canSendThisBar and enableAnyAddFund and everOL_state and addFundClassicCore
+            alert(f_fillPairVol(jsonAddFundTmpl, pairBot, volClassic), freqAny)
+            array.set(lastAnyTimeArr, i, time)
+        else if canSendThisBar and enableAnyAddFundQB and everOL_state and qBullOverAL and (addQuoteVolQB > 0)
+            alert(f_fillPairVol(jsonAddFundQBTmpl, pairBot, volQB), freqAny)
+            array.set(lastAnyTimeArr, i, time)
+
+    float denomBb = (not na(bbBasis_t) and bbBasis_t != 0) ? bbBasis_t : na
+    float bbPct = not na(denomBb) ? ((pxNow_t - bbBasis_t) / bbBasis_t) * 100.0 : na
+    float denomMacd = not na(macdSignal_t) ? math.max(math.abs(macdSignal_t), f_eps()) : na
+    float macdPct = (not na(macdLine_t) and not na(macdSignal_t)) ? ((macdLine_t - macdSignal_t) / denomMacd) * 100.0 : na
+    float histPct = (not na(macdHist_t) and not na(denomMacd)) ? (macdHist_t / denomMacd) * 100.0 : na
+    float rsiDiff = (not na(rsi_t) and not na(rsiMa_t)) ? (rsi_t - rsiMa_t) : na
+    float denomStoch = not na(stochD_t) ? math.max(math.abs(stochD_t), f_eps()) : na
+    float stochPct = (not na(stochK_t) and not na(stochD_t)) ? ((stochK_t - stochD_t) / denomStoch) * 100.0 : na
+
+    bool uptrendEdge = uptrendOk_t and not uptrendOk_t[1]
+    int upBs = ta.barssince(uptrendEdge)
+    bool uptrendRecent = uptrendOk_t and (uptrendRecencyBars == 0 ? uptrendEdge : (not na(upBs) and upBs <= uptrendRecencyBars))
+
+    bool condNeg = (not na(bbPct) and bbPct < 0) and (not na(macdPct) and macdPct < 0) and (not na(histPct) and histPct < 0) and (not na(rsiDiff) and rsiDiff < 0) and (not na(stochPct) and stochPct < 0)
+    bool condThr = (not na(uoVal_t) and uoVal_t < 40) and (not na(adxVal_t) and adxVal_t < 15) and (not na(relVol_t) and relVol_t < relVolMinAdd)
+    bool focusEligible = usePair and condNeg and condThr and uptrendRecent
+
+    float bbGap = (not na(bbPct) and bbPct < 0) ? math.abs(bbPct) : na
+    float macdGap = (not na(macdPct) and macdPct < 0) ? math.abs(macdPct) : na
+    float histGap = (not na(histPct) and histPct < 0) ? math.abs(histPct) : na
+    float rsiGap = (not na(rsiDiff) and rsiDiff < 0) ? math.abs(rsiDiff) : na
+    float stochGap = (not na(stochPct) and stochPct < 0) ? math.abs(stochPct) : na
+    float uoGap = (not na(uoVal_t) and uoVal_t < 40) ? (40 - uoVal_t) : na
+    float adxGap = (not na(adxVal_t) and adxVal_t < 15) ? (15 - adxVal_t) : na
+    float rvGap = (not na(relVol_t) and relVol_t < relVolMinAdd) ? (relVolMinAdd - relVol_t) : na
+    float trendBonus = (not na(upBs)) ? upBs : na
+
+    float focusScore = (focusEligible and not na(bbGap) and not na(macdGap) and not na(histGap) and not na(rsiGap) and not na(stochGap) and not na(uoGap) and not na(adxGap) and not na(rvGap) and not na(trendBonus)) ? (bbGap + macdGap + histGap + rsiGap + stochGap + uoGap + adxGap + rvGap + trendBonus) : na
+    array.set(fScoreArr, i, focusScore)
+    array.set(fEligArr, i, focusEligible)
+    array.set(fUoArr, i, uoVal_t)
+    array.set(fAdxArr, i, adxVal_t)
+    array.set(fRvArr, i, relVol_t)
+    array.set(fUpBsArr, i, upBs)
+
+    if usePair and showStatusTable
+        string trFCell = trFastOk ? "✓" : (statusShowUnchecked ? "×" : "")
+        string trSCell = trSlowOk ? "✓" : (statusShowUnchecked ? "×" : "")
+        string baseCell = hasBaseEff ? "✓" : (statusShowUnchecked ? "×" : "")
+        string bvalCell = hasBaseEff ? str.tostring(baseValEff, format.mintick) : (statusShowUnchecked ? "×" : "")
+        string bbCell = bbCrossUp_t ? "✓" : (not na(bbBasis_t) and bbBasis_t != 0 ? f_pctStr(pxNow_t - bbBasis_t, bbBasis_t) : "na")
+        string macdCell = macdCrossUp_t ? "✓" : (not na(macdLine_t) and not na(macdSignal_t) ? f_pctStr(macdLine_t - macdSignal_t, macdSignal_t) : "na")
+        string histCell = histCrossUp_t ? "✓" : (not na(macdHist_t) and not na(macdSignal_t) ? f_pctStr(macdHist_t, macdSignal_t) : "na")
+        string stochCell = stochCrossUp_t ? "✓" : (not na(stochK_t) and not na(stochD_t) ? f_pctStr(stochK_t - stochD_t, stochD_t) : "na")
+        string stCell = uptrendOk_t ? "✓" : (statusShowUnchecked ? "×" : "")
+        string eolCore = everOL_effective ? "✓" : (statusShowUnchecked ? "×" : "")
+        string eolCell = isChartSym ? (eolCore + modeChar) : eolCore
+        string rvCell = not na(relVol_t) ? (f_numStr(relVol_t) + (relVol_t >= relVolMinAdd ? " ✓" : " (-)")) : "na"
+        string passedAFQBCell = qBullOverAL ? "✓" : (statusShowUnchecked ? "×" : "")
+        string qBearSigCell = qBearSignal ? "✓" : (statusShowUnchecked ? "×" : "")
+        string qBullSigCell = qBullSignal ? "✓" : (statusShowUnchecked ? "×" : "")
+        string osCell = overCondTF ? "✓" : (statusShowUnchecked ? "×" : "")
+        string qBullorOSCell = qBullOverAL ? "✓" : (statusShowUnchecked ? "×" : "")
+        string uoCell = not na(uoVal_t) ? (f_numStr(uoVal_t) + (uoVal_t > 40 and uoVal_t < uoMax ? " ✓" : uoVal_t <= 40 ? " (-)" : " (!)")) : "na"
+        float rsiDiff2 = (not na(rsi_t) and not na(rsiMa_t)) ? (rsi_t - rsiMa_t) : na
+        string rsiCell = rsiCrossUp_t ? "✓" : (not na(rsiDiff2) ? (rsiDiff2 < 0 ? "(-)" + f_numStr(math.abs(rsiDiff2)) : f_numStr(rsiDiff2)) : "na")
+        string adxCell = not na(adxVal_t) ? (f_numStr(adxVal_t) + (adxVal_t > 15 and adxVal_t < adxMax ? " ✓" : adxVal_t <= 15 ? " (-)" : " (!)")) : "na"
+        array.set(stPair, i, symTxt)
+        array.set(stTrF, i, trFCell)
+        array.set(stTrS, i, trSCell)
+        array.set(stBase, i, baseCell)
+        array.set(stBVal, i, bvalCell)
+        array.set(stBB, i, bbCell)
+        array.set(stMACD, i, macdCell)
+        array.set(stHIST, i, histCell)
+        array.set(stUO, i, uoCell)
+        array.set(stRSI, i, rsiCell)
+        array.set(stADX, i, adxCell)
+        array.set(stSTOCH, i, stochCell)
+        array.set(stST, i, stCell)
+        array.set(stEOL, i, eolCell)
+        array.set(stRV, i, rvCell)
+        array.set(stPassedAFQB, i, passedAFQBCell)
+        array.set(stQBear, i, qBearSigCell)
+        array.set(stQBull, i, qBullSigCell)
+        array.set(stOS, i, osCell)
+        array.set(stQBullorOS, i, qBullorOSCell)
+
+    if isChartSym
+        qBearNowChart := qBearSignal
+        qBullNowChart := qBullSignal
+        stBearChart := stBearLtf
+        stBullChart := stBullLtf
+        baseEffChart := baseValEff
+        hasBaseChart := hasBaseEff
+
+alertcondition(anyQuickBearTrig, title="QuickBear Trigger", message=" ")
+alertcondition(anyQuickBullOverTrig, title="QuickBull or OverSMAs", message=" ")
+
+plotshape(showQuickBearLabels and qBearNowChart, title="QuickBear Arrow", location=location.abovebar, style=shape.triangledown, color=color.red, size=size.tiny, text="QBear")
+plotshape(showQuickBullLabels and qBullNowChart, title="QuickBull Arrow", location=location.belowbar, style=shape.triangleup, color=color.blue, size=size.tiny, text="QBull")
+
+if showQuickBearLabels
+    float atrQBv = ta.atr(qBearAtrLenVis)
+    float yQB = high + atrQBv * qBearOffATRVis
+    int xQB = bar_index + qBearLblRight
+    if na(qBearCountLbl)
+        qBearCountLbl := label.new(xQB, yQB, "", xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_down, textcolor=color.white, color=color.new(color.red, 10), size=size.normal)
+    label.set_xy(qBearCountLbl, xQB, yQB)
+    label.set_text(qBearCountLbl, "QBear " + bearLowerTF + " fat=" + str.tostring(stBearChart) + "/" + str.tostring(bearMinFat) + " base=" + (hasBaseChart ? str.tostring(baseEffChart, format.mintick) : "na"))
+else
+    if not na(qBearCountLbl)
+        label.delete(qBearCountLbl)
+        qBearCountLbl := na
+
+if showQuickBullLabels
+    float atrQUv = ta.atr(qBullAtrLenVis)
+    float yQU = low - atrQUv * qBullOffATRVis
+    int xQU = bar_index + qBullLblRight
+    if na(qBullCountLbl)
+        qBullCountLbl := label.new(xQU, yQU, "", xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_up, textcolor=color.white, color=color.new(color.blue, 10), size=size.normal)
+    label.set_xy(qBullCountLbl, xQU, yQU)
+    label.set_text(qBullCountLbl, "QBull " + bullLowerTF + " fat=" + str.tostring(stBullChart) + "/" + str.tostring(bullMinFat) + " base=" + (hasBaseChart ? str.tostring(baseEffChart, format.mintick) : "na"))
+else
+    if not na(qBullCountLbl)
+        label.delete(qBullCountLbl)
+        qBullCountLbl := na
+
+if barstate.islast and not na(tbl) and showStatusTable
+    int r0 = tableOffY
+    int c0 = tableOffX
+    string sp = str.repeat("ㅤ", spacerChars)
+
+    if tableOffY > 0
+        for rr = 0 to tableOffY - 1
+            table.cell(tbl, 0, rr, sp, text_size=trTextSize)
+    if tableOffX > 0
+        for cc = 0 to tableOffX - 1
+            table.cell(tbl, cc, r0, sp, text_size=trTextSize)
+
+    table.cell(tbl, c0 + 0, r0 + 0, "PAIR", text_halign=text.align_left, text_size=trTextSize)
+    table.cell(tbl, c0 + 1, r0 + 0, "BB", text_halign=text.align_center, text_size=trTextSize)
+    table.cell(tbl, c0 + 2, r0 + 0, "MACD", text_halign=text.align_center, text_size=trTextSize)
+    table.cell(tbl, c0 + 3, r0 + 0, "HIST", text_halign=text.align_center, text_size=trTextSize)
+    table.cell(tbl, c0 + 4, r0 + 0, "UO", text_halign=text.align_center, text_size=trTextSize)
+    table.cell(tbl, c0 + 5, r0 + 0, "RSI", text_halign=text.align_center, text_size=trTextSize)
+    table.cell(tbl, c0 + 6, r0 + 0, "ADX", text_halign=text.align_center, text_size=trTextSize)
+    table.cell(tbl, c0 + 7, r0 + 0, "STOCH", text_halign=text.align_center, text_size=trTextSize)
+    table.cell(tbl, c0 + 8, r0 + 0, "ST", text_halign=text.align_center, text_size=trTextSize)
+    table.cell(tbl, c0 + 9, r0 + 0, "everOL", text_halign=text.align_center, text_size=trTextSize)
+    table.cell(tbl, c0 + 10, r0 + 0, "RelVol", text_halign=text.align_center, text_size=trTextSize)
+    table.cell(tbl, c0 + 11, r0 + 0, "TR Fast (30m/4H) ↑×3", text_halign=text.align_center, text_size=trTextSize)
+    table.cell(tbl, c0 + 12, r0 + 0, "TR Slow (1D/1W) ↑×2", text_halign=text.align_center, text_size=trTextSize)
+    table.cell(tbl, c0 + 13, r0 + 0, "BASE", text_halign=text.align_center, text_size=trTextSize)
+    table.cell(tbl, c0 + 14, r0 + 0, "BVAL", text_halign=text.align_center, text_size=trTextSize)
+    table.cell(tbl, c0 + 15, r0 + 0, "Passed_AFQB", text_halign=text.align_center, text_size=trTextSize)
+    table.cell(tbl, c0 + 16, r0 + 0, "QBear", text_halign=text.align_center, text_size=trTextSize)
+    table.cell(tbl, c0 + 17, r0 + 0, "QBull", text_halign=text.align_center, text_size=trTextSize)
+    table.cell(tbl, c0 + 18, r0 + 0, "SMA>20&50", text_halign=text.align_center, text_size=trTextSize)
+    table.cell(tbl, c0 + 19, r0 + 0, "QBullorOS", text_halign=text.align_center, text_size=trTextSize)
+
+    for i = 0 to maxPairs - 1
+        if i < pairsCount
+            int rr = r0 + 1 + i
+            table.cell(tbl, c0 + 0, rr, array.get(stPair, i), text_halign=text.align_left, text_size=trTextSize)
+            table.cell(tbl, c0 + 1, rr, array.get(stBB, i), text_halign=text.align_center, text_size=trTextSize)
+            table.cell(tbl, c0 + 2, rr, array.get(stMACD, i), text_halign=text.align_center, text_size=trTextSize)
+            table.cell(tbl, c0 + 3, rr, array.get(stHIST, i), text_halign=text.align_center, text_size=trTextSize)
+            table.cell(tbl, c0 + 4, rr, array.get(stUO, i), text_halign=text.align_center, text_size=trTextSize)
+            table.cell(tbl, c0 + 5, rr, array.get(stRSI, i), text_halign=text.align_center, text_size=trTextSize)
+            table.cell(tbl, c0 + 6, rr, array.get(stADX, i), text_halign=text.align_center, text_size=trTextSize)
+            table.cell(tbl, c0 + 7, rr, array.get(stSTOCH, i), text_halign=text.align_center, text_size=trTextSize)
+            table.cell(tbl, c0 + 8, rr, array.get(stST, i), text_halign=text.align_center, text_size=trTextSize)
+            table.cell(tbl, c0 + 9, rr, array.get(stEOL, i), text_halign=text.align_center, text_size=trTextSize)
+            table.cell(tbl, c0 + 10, rr, array.get(stRV, i), text_halign=text.align_center, text_size=trTextSize)
+            table.cell(tbl, c0 + 11, rr, array.get(stTrF, i), text_halign=text.align_center, text_size=trTextSize)
+            table.cell(tbl, c0 + 12, rr, array.get(stTrS, i), text_halign=text.align_center, text_size=trTextSize)
+            table.cell(tbl, c0 + 13, rr, array.get(stBase, i), text_halign=text.align_center, text_size=trTextSize)
+            table.cell(tbl, c0 + 14, rr, array.get(stBVal, i), text_halign=text.align_center, text_size=trTextSize)
+            table.cell(tbl, c0 + 15, rr, array.get(stPassedAFQB, i), text_halign=text.align_center, text_size=trTextSize)
+            table.cell(tbl, c0 + 16, rr, array.get(stQBear, i), text_halign=text.align_center, text_size=trTextSize)
+            table.cell(tbl, c0 + 17, rr, array.get(stQBull, i), text_halign=text.align_center, text_size=trTextSize)
+            table.cell(tbl, c0 + 18, rr, array.get(stOS, i), text_halign=text.align_center, text_size=trTextSize)
+            table.cell(tbl, c0 + 19, rr, array.get(stQBullorOS, i), text_halign=text.align_center, text_size=trTextSize)
+
+    if showFocusRows
+        int best1 = na
+        int best2 = na
+        float best1Score = na
+        float best2Score = na
+        for i = 0 to maxPairs - 1
+            if i < pairsCount and array.get(fEligArr, i) and not na(array.get(fScoreArr, i))
+                float s = array.get(fScoreArr, i)
+                if na(best1Score) or s < best1Score
+                    best2Score := best1Score
+                    best2 := best1
+                    best1Score := s
+                    best1 := i
+                else if na(best2Score) or s < best2Score
+                    best2Score := s
+                    best2 := i
+
+        int rrBlank = r0 + 1 + pairsCount
+        int rr1 = r0 + 2 + pairsCount
+        int rr2 = r0 + 3 + pairsCount
+        for cc = 0 to 19
+            table.cell(tbl, c0 + cc, rrBlank, "", text_size=trTextSize)
+
+        string p1 = na(best1) ? "n/a" : array.get(stPair, best1)
+        string p2 = na(best2) ? "n/a" : array.get(stPair, best2)
+        string s1 = na(best1Score) ? "n/a" : str.tostring(best1Score, "#.###")
+        string s2 = na(best2Score) ? "n/a" : str.tostring(best2Score, "#.###")
+        string e1 = na(best1) ? "" : ("UOgap=" + str.tostring(40 - array.get(fUoArr, best1), "#.##") + " ADXgap=" + str.tostring(15 - array.get(fAdxArr, best1), "#.##") + " RVgap=" + str.tostring(relVolMinAdd - array.get(fRvArr, best1), "#.##") + " UpBs=" + str.tostring(array.get(fUpBsArr, best1)))
+        string e2 = na(best2) ? "" : ("UOgap=" + str.tostring(40 - array.get(fUoArr, best2), "#.##") + " ADXgap=" + str.tostring(15 - array.get(fAdxArr, best2), "#.##") + " RVgap=" + str.tostring(relVolMinAdd - array.get(fRvArr, best2), "#.##") + " UpBs=" + str.tostring(array.get(fUpBsArr, best2)))
+
+        table.cell(tbl, c0 + 0, rr1, "FOCUS #1", text_halign=text.align_left, text_size=trTextSize)
+        table.cell(tbl, c0 + 1, rr1, p1, text_halign=text.align_left, text_size=trTextSize)
+        table.cell(tbl, c0 + 2, rr1, "Score", text_halign=text.align_left, text_size=trTextSize)
+        table.cell(tbl, c0 + 3, rr1, s1, text_halign=text.align_left, text_size=trTextSize)
+        table.cell(tbl, c0 + 4, rr1, e1, text_halign=text.align_left, text_size=trTextSize)
+
+        table.cell(tbl, c0 + 0, rr2, "FOCUS #2", text_halign=text.align_left, text_size=trTextSize)
+        table.cell(tbl, c0 + 1, rr2, p2, text_halign=text.align_left, text_size=trTextSize)
+        table.cell(tbl, c0 + 2, rr2, "Score", text_halign=text.align_left, text_size=trTextSize)
+        table.cell(tbl, c0 + 3, rr2, s2, text_halign=text.align_left, text_size=trTextSize)
+        table.cell(tbl, c0 + 4, rr2, e2, text_halign=text.align_left, text_size=trTextSize)
