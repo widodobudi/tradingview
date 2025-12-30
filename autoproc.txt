@@ -302,12 +302,14 @@ for i = 0 to maxPairs - 1
 
     bool baseLocked = array.get(baseLockedArr, i)
     float baseVal = array.get(baseValArr, i)
+    bool baseJustLocked = false
 
     if usePair and useAutoBaseOLOverSMAs and everOL_state and overCondTF and (not baseLocked)
         array.set(baseLockedArr, i, true)
         array.set(baseValArr, i, pxNow_t)
         baseLocked := true
         baseVal := pxNow_t
+        baseJustLocked := true
 
     bool manualHas = manualBaseSingle > 0
     float baseValEff = manualHas ? manualBaseSingle : (baseLocked and not na(baseVal) and baseVal > 0 ? baseVal : na)
@@ -379,13 +381,11 @@ for i = 0 to maxPairs - 1
     string volAfterBase = str.tostring(int(autoAddFundAfterBaseUSDT))
 
     if usePair and enableAnyAlerts
+        if baseJustLocked and (autoAddFundAfterBaseUSDT > 0)
+            alert(f_fillPairVol(jsonAddFundAfterBaseTmpl, pairBot, volAfterBase), freqAny)
         if canSendThisBar and enableAnyOpenLong and longSig7
             alert(f_fillPairOnly(jsonOpenLongTmpl, pairBot), freqAny)
             array.set(lastAnyTimeArr, i, time)
-            if useAutoBaseOLOverSMAs and overCondTF and (not array.get(baseLockedArr, i)) and (autoAddFundAfterBaseUSDT > 0)
-                array.set(baseLockedArr, i, true)
-                array.set(baseValArr, i, pxNow_t)
-                alert(f_fillPairVol(jsonAddFundAfterBaseTmpl, pairBot, volAfterBase), freqAny)
         else if canSendThisBar and enableAnyAddFund and everOL_state and addFundClassicCore
             alert(f_fillPairVol(jsonAddFundTmpl, pairBot, volClassic), freqAny)
             array.set(lastAnyTimeArr, i, time)
