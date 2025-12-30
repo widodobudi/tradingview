@@ -294,8 +294,21 @@ for i = 0 to maxPairs - 1
     bool trFastOk = not na(rtFast) and (rtFast > tr30MinAdd) and (not useTr30Up3 or tr8Up3)
     bool trSlowOk = not na(rtSlow) and (rtSlow > tr1dMinAdd) and (not useTr1DUp2 or tr9Up2)
 
+    bool longSig7 = (not usePriceCrossBB or bbPass_t) and (not useMacdCross or macdPass_t) and (not useHistCrossZero or histPass_t) and (not useUoFilter or uoCond_t) and (not useRsiCrossMa or rsiPass_t) and (not useAdxFilter or adxCond_t) and (not useStochCross or stochPass_t) and (not usePriceAboveUpTrendST or uptrendOk_t)
+    bool openLongEvent = longSig7 and ((anyFreqOpt == "OPBC") ? barstate.isconfirmed : true)
+    if usePair and openLongEvent
+        array.set(everOlArr, i, true)
+    bool everOL_state = array.get(everOlArr, i)
+
     bool baseLocked = array.get(baseLockedArr, i)
     float baseVal = array.get(baseValArr, i)
+
+    if usePair and useAutoBaseOLOverSMAs and everOL_state and overCondTF and (not baseLocked)
+        array.set(baseLockedArr, i, true)
+        array.set(baseValArr, i, pxNow_t)
+        baseLocked := true
+        baseVal := pxNow_t
+
     bool manualHas = manualBaseSingle > 0
     float baseValEff = manualHas ? manualBaseSingle : (baseLocked and not na(baseVal) and baseVal > 0 ? baseVal : na)
     bool hasBaseEff = manualHas or (baseLocked and not na(baseVal) and baseVal > 0)
@@ -316,11 +329,6 @@ for i = 0 to maxPairs - 1
             bool startOKB = hasBaseEff and (cB >= baseValEff * (1 + bearStartAbove/100.0))
             if (stBearLtf >= bearMinFat) and startOKB
                 qBearAnyInBar := true
-    bool longSig7 = (not usePriceCrossBB or bbPass_t) and (not useMacdCross or macdPass_t) and (not useHistCrossZero or histPass_t) and (not useUoFilter or uoCond_t) and (not useRsiCrossMa or rsiPass_t) and (not useAdxFilter or adxCond_t) and (not useStochCross or stochPass_t) and (not usePriceAboveUpTrendST or uptrendOk_t)
-    bool openLongEvent = longSig7 and ((anyFreqOpt == "OPBC") ? barstate.isconfirmed : true)
-    if usePair and openLongEvent
-        array.set(everOlArr, i, true)    
-    bool everOL_state = array.get(everOlArr, i)
     bool quickBearXgtBB = everOL_state and not na(bbUpper_t) and (pxNow_t > bbUpper_t * (1 + xPctBBUpper / 100.0))
     bool qBearSignal = everOL_state and hasBaseEff and qBearAnyInBar
 
